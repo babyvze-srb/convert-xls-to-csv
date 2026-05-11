@@ -3,11 +3,43 @@ import pandas as pd
 from io import BytesIO
 from datetime import datetime
 import re
+import os
 
 st.set_page_config(page_title="CSV ke XLSX Converter", page_icon="📄")
 
 st.title("📄 Convert CSV ke XLSX")
 st.write("Upload file CSV lalu convert ke Excel (.xlsx)")
+
+# =========================
+# UPLOAD FILE
+# =========================
+uploaded_file = st.file_uploader(
+    "Upload File CSV",
+    type=["csv"]
+)
+
+today = datetime.now().strftime("%d-%m-%Y")
+date_range = today
+
+original_filename = ""
+suggested_name = f"template_{today}"
+
+# =========================
+# DETECT NAMA + TANGGAL
+# =========================
+if uploaded_file is not None:
+    original_filename = uploaded_file.name
+
+    # Hapus ekstensi .csv
+    suggested_name = os.path.splitext(original_filename)[0]
+
+    # Cari tanggal dari nama file
+    dates = re.findall(r"\d{2}-\d{2}-\d{4}", original_filename)
+
+    if len(dates) >= 2:
+        date_range = f"{dates[0]}_{dates[1]}"
+    elif len(dates) == 1:
+        date_range = dates[0]
 
 # =========================
 # PENGATURAN NAMA FILE
@@ -20,31 +52,15 @@ save_mode = st.radio(
     horizontal=True
 )
 
-uploaded_file = st.file_uploader(
-    "Upload File CSV",
-    type=["csv"]
-)
-
-today = datetime.now().strftime("%d-%m-%Y")
-date_range = today  # default fallback
-
-# Detect tanggal dari nama file
-if uploaded_file is not None:
-    original_filename = uploaded_file.name
-
-    dates = re.findall(r"\d{2}-\d{2}-\d{4}", original_filename)
-
-    if len(dates) >= 2:
-        date_range = f"{dates[0]}_{dates[1]}"
-    elif len(dates) == 1:
-        date_range = dates[0]
-
-# Generate nama file
 if save_mode == "Custom":
-    custom_name = st.text_input("Masukkan nama file")
+
+    custom_name = st.text_input(
+        "Masukkan nama file",
+        value=suggested_name
+    )
 
     if custom_name.strip() == "":
-        file_name = f"template_{date_range}.xlsx"
+        file_name = f"{suggested_name}.xlsx"
     else:
         file_name = f"{custom_name.strip()}.xlsx"
 
@@ -65,7 +81,7 @@ else:
 
     file_name = f"Penjualan_{kategori1}_{kategori2}_{date_range}.xlsx"
 
-st.write(f"**Nama file:** `{file_name}`")
+st.write(f"**Nama file yang akan disimpan:** `{file_name}`")
 
 # =========================
 # PROCESS FILE
@@ -103,7 +119,7 @@ if uploaded_file is not None:
 
         st.success("CSV berhasil dibaca")
 
-        # Tombol download
+        # Download button sinkron dengan input nama
         st.download_button(
             label="⬇ Download XLSX",
             data=output,
@@ -111,7 +127,6 @@ if uploaded_file is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-        # Preview
         st.subheader("Preview Data")
         st.dataframe(df, use_container_width=True)
 
