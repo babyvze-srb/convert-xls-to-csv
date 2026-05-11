@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+from datetime import datetime
 
 st.set_page_config(page_title="CSV ke XLSX Converter", page_icon="📄")
 
@@ -15,7 +16,7 @@ uploaded_file = st.file_uploader(
 if uploaded_file is not None:
 
     st.info(
-        "Jika nama mengandung koma seperti:\n"
+        'Jika nama mengandung koma seperti:\n'
         '"PT MAJU, JAYA"\n'
         "pastikan di CSV dibungkus tanda kutip."
     )
@@ -32,7 +33,6 @@ if uploaded_file is not None:
 
         # Tukar kolom pertama dan kedua
         cols = list(df.columns)
-
         if len(cols) >= 2:
             cols[0], cols[1] = cols[1], cols[0]
             df = df[cols]
@@ -42,7 +42,44 @@ if uploaded_file is not None:
         st.subheader("Preview Data")
         st.dataframe(df)
 
-        # Convert ke Excel
+        # =========================
+        # PILIH NAMA FILE
+        # =========================
+        st.subheader("Pengaturan Nama File")
+
+        save_mode = st.radio(
+            "Pilih metode penyimpanan:",
+            ["Custom", "Template"]
+        )
+
+        today = datetime.now().strftime("%d-%m-%Y")
+
+        if save_mode == "Custom":
+            custom_name = st.text_input("Masukkan nama file")
+
+            if custom_name.strip() == "":
+                file_name = f"template_{today}.xlsx"
+            else:
+                file_name = f"{custom_name.strip()}.xlsx"
+
+        else:
+            kategori1 = st.selectbox(
+                "Pilih kategori pertama",
+                ["OLI", "LPG"]
+            )
+
+            kategori2 = st.selectbox(
+                "Pilih kategori kedua",
+                ["SRB", "SGE"]
+            )
+
+            file_name = f"Penjualan_{kategori1}_{kategori2}_{today}.xlsx"
+
+        st.write(f"**Nama file:** `{file_name}`")
+
+        # =========================
+        # CONVERT EXCEL
+        # =========================
         output = BytesIO()
 
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -53,7 +90,7 @@ if uploaded_file is not None:
         st.download_button(
             label="⬇ Download XLSX",
             data=output,
-            file_name="hasil_convert.xlsx",
+            file_name=file_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
