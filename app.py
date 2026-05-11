@@ -8,6 +8,46 @@ st.set_page_config(page_title="CSV ke XLSX Converter", page_icon="📄")
 st.title("📄 Convert CSV ke XLSX")
 st.write("Upload file CSV lalu convert ke Excel (.xlsx)")
 
+# =========================
+# PENGATURAN NAMA FILE (ATAS)
+# =========================
+st.subheader("Pengaturan Nama File")
+
+save_mode = st.radio(
+    "Pilih metode penyimpanan:",
+    ["Custom", "Template"],
+    horizontal=True
+)
+
+today = datetime.now().strftime("%d-%m-%Y")
+
+if save_mode == "Custom":
+    custom_name = st.text_input("Masukkan nama file")
+
+    if custom_name.strip() == "":
+        file_name = f"template_{today}.xlsx"
+    else:
+        file_name = f"{custom_name.strip()}.xlsx"
+
+else:
+    col1, col2 = st.columns(2)
+
+    with col1:
+        kategori1 = st.selectbox(
+            "Pilih kategori pertama",
+            ["OLI", "LPG"]
+        )
+
+    with col2:
+        kategori2 = st.selectbox(
+            "Pilih kategori kedua",
+            ["SRB", "SGE"]
+        )
+
+    file_name = f"Penjualan_{kategori1}_{kategori2}_{today}.xlsx"
+
+st.write(f"**Nama file:** `{file_name}`")
+
 uploaded_file = st.file_uploader(
     "Upload File CSV",
     type=["csv"]
@@ -15,14 +55,7 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
 
-    st.info(
-        'Jika nama mengandung koma seperti:\n'
-        '"PT MAJU, JAYA"\n'
-        "pastikan di CSV dibungkus tanda kutip."
-    )
-
     try:
-        # Baca CSV
         df = pd.read_csv(
             uploaded_file,
             sep=",",
@@ -42,44 +75,6 @@ if uploaded_file is not None:
         st.subheader("Preview Data")
         st.dataframe(df)
 
-        # =========================
-        # PILIH NAMA FILE
-        # =========================
-        st.subheader("Pengaturan Nama File")
-
-        save_mode = st.radio(
-            "Pilih metode penyimpanan:",
-            ["Custom", "Template"]
-        )
-
-        today = datetime.now().strftime("%d-%m-%Y")
-
-        if save_mode == "Custom":
-            custom_name = st.text_input("Masukkan nama file")
-
-            if custom_name.strip() == "":
-                file_name = f"template_{today}.xlsx"
-            else:
-                file_name = f"{custom_name.strip()}.xlsx"
-
-        else:
-            kategori1 = st.selectbox(
-                "Pilih kategori pertama",
-                ["OLI", "LPG"]
-            )
-
-            kategori2 = st.selectbox(
-                "Pilih kategori kedua",
-                ["SRB", "SGE"]
-            )
-
-            file_name = f"Penjualan_{kategori1}_{kategori2}_{today}.xlsx"
-
-        st.write(f"**Nama file:** `{file_name}`")
-
-        # =========================
-        # CONVERT EXCEL
-        # =========================
         output = BytesIO()
 
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
