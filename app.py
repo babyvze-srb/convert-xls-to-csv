@@ -70,11 +70,7 @@ if uploaded_file is not None:
             cols[0], cols[1] = cols[1], cols[0]
             df = df[cols]
 
-        st.success("CSV berhasil dibaca dan kolom ditukar")
-
-        st.subheader("Preview Data")
-        st.dataframe(df)
-
+        # Buat file excel dulu
         output = BytesIO()
 
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -82,12 +78,19 @@ if uploaded_file is not None:
 
         output.seek(0)
 
+        st.success("CSV berhasil dibaca")
+
+        # tombol download di sini
         st.download_button(
             label="⬇ Download XLSX",
             data=output,
             file_name=file_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
+        # preview setelah tombol
+        st.subheader("Preview Data")
+        st.dataframe(df)
 
     except Exception as e:
         st.error(f"Gagal membaca file CSV: {e}")
