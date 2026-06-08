@@ -178,6 +178,13 @@ if uploaded_file is not None:
             engine="python"
         )
 
+        # TRIM SEMUA TEXT
+        df = df.apply(
+            lambda col: col.str.strip()
+            if col.dtype == "object"
+            else col
+        )
+
         # Tukar kolom pertama dan kedua
         cols = list(df.columns)
 
