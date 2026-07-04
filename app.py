@@ -4,8 +4,10 @@ from io import BytesIO
 from datetime import datetime
 import re
 import os
-import json
-import base64
+import numpy as np
+import cv2
+import pytesseract
+from PIL import Image
 
 st.set_page_config(
     page_title="Tools Rekap - CSV & Ekstraksi Foto",
@@ -156,8 +158,14 @@ def render_csv_to_xlsx():
 
 
 # =====================================================================
-# MENU 2: EKSTRAKSI TABEL DARI FOTO (AI VISION)
+# MENU 2: EKSTRAKSI TABEL DARI FOTO (OCR LOKAL - TANPA AI/ANTHROPIC)
 # =====================================================================
+# Pipeline ini 100% jalan lokal di komputer (OpenCV + Tesseract OCR),
+# tidak memanggil API apapun, tidak butuh API key, tidak butuh internet.
+# Karena tidak pakai AI vision, akurasinya lebih rendah dibanding model AI -
+# terutama untuk kolom angka dan tabel dengan header bertingkat. Hasil
+# ekstraksi WAJIB diperiksa & dikoreksi manual sebelum dipakai.
+
 COLUMNS = [
     ("tanggal", "Tanggal"),
     ("no_sj", "No. SJ/DO"),
@@ -175,81 +183,158 @@ COLUMNS = [
     ("is_total", "Baris Total?"),
 ]
 
-EXTRACTION_PROMPT = """Kamu melihat foto tabel berjudul "REKAPITULASI PENGELUARAN LPG/BRIGHT GAS".
-Tabel punya kolom: NO. SJ/DO, SOPIR, NAMA SUPPLIER, lalu grup kolom "50 KG" (sub-kolom IS, KSG),
-grup "12 KG" (sub-kolom IS, KSG), grup "5,5 KG" (sub-kolom IS, KSG), dan kadang grup "IS + TGB"
-(sub-kolom 50KG, 12KG, 5,5KG). Ada juga tanggal di judul tabel (contoh: "30 Juni 2026"),
-dan baris TOTAL / GRAND TOTAL di bagian bawah.
-
-Baca SEMUA baris pada tabel di foto ini, termasuk baris yang selnya kosong (isi kosong dengan string kosong "").
-Jangan lewatkan baris manapun. Perhatikan baik-baik angka yang tertulis, jangan menebak jika tidak yakin -
-kalau benar-benar tidak terbaca, isi dengan "?".
-
-Balas HANYA dengan JSON valid (tanpa markdown, tanpa teks lain), dengan struktur persis seperti ini:
-
-{
-  "tanggal": "<tanggal yang tertulis di judul tabel, contoh: 30 Juni 2026, atau '' jika tidak ada>",
-  "rows": [
-    {
-      "no_sj": "",
-      "sopir": "",
-      "nama_supplier": "",
-      "kg50_is": "",
-      "kg50_ksg": "",
-      "kg12_is": "",
-      "kg12_ksg": "",
-      "kg55_is": "",
-      "kg55_ksg": "",
-      "istgb_50": "",
-      "istgb_12": "",
-      "istgb_55": "",
-      "is_total": false
-    }
-  ]
-}
-
-Set "is_total": true HANYA untuk baris TOTAL atau GRAND TOTAL (isi nama_supplier dengan "TOTAL" atau "GRAND TOTAL").
-Semua nilai angka ditulis sebagai string persis seperti di foto (boleh kosong "").
-"""
+# Label kolom data (tanpa "tanggal" dan "is_total"), urutan kiri->kanan
+# sesuai struktur tabel LPG standar. Dipetakan sesuai jumlah kolom yang
+# berhasil dideteksi dari grid foto.
+DATA_LABELS_ORDERED = [label for key, label in COLUMNS if key not in ("tanggal", "is_total")]
 
 
-def call_claude_extract(api_key, image_bytes, media_type, model="claude-sonnet-5"):
-    """Panggil Anthropic API dengan gambar, kembalikan dict hasil parse JSON."""
-    import anthropic
+def _get_line_positions(sum_arr, min_gap=8, thresh_ratio=0.15):
+    """Cari posisi garis (baris/kolom) dari profil proyeksi piksel putih."""
+    if sum_arr.max() == 0:
+        return []
+    thresh = sum_arr.max() * thresh_ratio
+    idx = np.where(sum_arr > thresh)[0]
+    if len(idx) == 0:
+        return []
+    groups = []
+    start = idx[0]
+    prev = idx[0]
+    for i in idx[1:]:
+        if i - prev > min_gap:
+            groups.append((start + prev) // 2)
+            start = i
+        prev = i
+    groups.append((start + prev) // 2)
+    return groups
 
-    client = anthropic.Anthropic(api_key=api_key)
-    b64data = base64.standard_b64encode(image_bytes).decode("utf-8")
 
-    message = client.messages.create(
-        model=model,
-        max_tokens=4000,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": b64data,
-                        },
-                    },
-                    {"type": "text", "text": EXTRACTION_PROMPT},
-                ],
-            }
-        ],
+def _clean_lines(lines, min_gap=15):
+    """Gabungkan garis yang terlalu berdekatan (noise) jadi satu."""
+    if not lines:
+        return lines
+    cleaned = [lines[0]]
+    for v in lines[1:]:
+        if v - cleaned[-1] < min_gap:
+            continue
+        cleaned.append(v)
+    return cleaned
+
+
+def _detect_grid(gray):
+    """Deteksi garis horizontal & vertikal tabel dari gambar grayscale."""
+    thresh = cv2.adaptiveThreshold(
+        ~gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, -2
     )
+    h, w = gray.shape
 
-    text_parts = [b.text for b in message.content if getattr(b, "type", "") == "text"]
-    raw = "\n".join(text_parts).strip()
-    raw = re.sub(r"^```(json)?", "", raw.strip())
-    raw = re.sub(r"```$", "", raw.strip()).strip()
+    horizontal = thresh.copy()
+    h_size = max(10, w // 30)
+    h_struct = cv2.getStructuringElement(cv2.MORPH_RECT, (h_size, 1))
+    horizontal = cv2.erode(horizontal, h_struct)
+    horizontal = cv2.dilate(horizontal, h_struct)
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Gagal membaca respons AI sebagai JSON:\n{e}\n\nRespons mentah:\n{raw[:1000]}")
+    vertical = thresh.copy()
+    v_size = max(10, h // 30)
+    v_struct = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_size))
+    vertical = cv2.erode(vertical, v_struct)
+    vertical = cv2.dilate(vertical, v_struct)
+
+    row_sum = horizontal.sum(axis=1) / 255
+    col_sum = vertical.sum(axis=0) / 255
+
+    ys = _clean_lines(_get_line_positions(row_sum), min_gap=15)
+    xs = _get_line_positions(col_sum)
+    xs_filtered = [xs[0]] if xs else []
+    for v in xs[1:]:
+        if v - xs_filtered[-1] < 25:
+            continue
+        xs_filtered.append(v)
+    return xs_filtered, ys
+
+
+def _ocr_cell(gray, y1, y2, x1, x2, numeric=False, pad=4):
+    """OCR satu sel tabel. numeric=True membatasi karakter ke angka saja."""
+    y1p = max(0, y1 + pad)
+    y2p = max(y1p + 1, y2 - pad)
+    x1p = max(0, x1 + pad)
+    x2p = max(x1p + 1, x2 - pad)
+    crop = gray[y1p:y2p, x1p:x2p]
+    if crop.size == 0:
+        return ""
+    crop = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    crop = cv2.GaussianBlur(crop, (3, 3), 0)
+    _, bw = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    bw = cv2.medianBlur(bw, 3)
+
+    if numeric:
+        cfg = "--psm 7 -c tessedit_char_whitelist=0123456789-,."
+    else:
+        cfg = "--psm 6"
+    txt = pytesseract.image_to_string(bw, config=cfg)
+    txt = re.sub(r"[^A-Za-z0-9,./\-\s]", "", txt).strip()
+    txt = re.sub(r"\s+", " ", txt)
+    return txt
+
+
+def _extract_title_date(gray):
+    """Coba baca teks judul (baris paling atas gambar) untuk cari tanggal."""
+    h, w = gray.shape
+    top_strip = gray[0: int(h * 0.14), :]
+    txt = pytesseract.image_to_string(top_strip, config="--psm 6")
+    match = re.search(
+        r"(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|Mei|Jun|Jul|Agu|Sep|Okt|Nov|Des)\w*\s+\d{4})",
+        txt, flags=re.IGNORECASE
+    )
+    return match.group(1) if match else ""
+
+
+def extract_table_local(image_bytes):
+    """
+    Ekstrak tabel dari foto secara lokal (OpenCV + Tesseract).
+    Return: (tanggal_terdeteksi, list_of_row_dicts (label -> value))
+    """
+    file_bytes = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Gagal membaca file gambar.")
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    xs, ys = _detect_grid(gray)
+
+    if len(xs) < 3 or len(ys) < 3:
+        raise ValueError(
+            "Garis tabel tidak terdeteksi dengan jelas pada foto ini. "
+            "Coba foto ulang dengan pencahayaan lebih rata dan tabel tidak miring."
+        )
+
+    row_heights = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+    median_h = sorted(row_heights)[len(row_heights) // 2] if row_heights else 20
+
+    n_cols = len(xs) - 1
+    col_labels = DATA_LABELS_ORDERED[:n_cols]
+    while len(col_labels) < n_cols:
+        col_labels.append(f"Kolom Ekstra {len(col_labels) + 1}")
+
+    tanggal = _extract_title_date(gray)
+    rows = []
+
+    for i in range(len(ys) - 1):
+        y1, y2 = ys[i], ys[i + 1]
+        if y2 - y1 > median_h * 1.8:
+            # Baris tinggi = kemungkinan blok header, lewati (bukan data)
+            continue
+        row = {}
+        for j in range(n_cols):
+            x1, x2 = xs[j], xs[j + 1]
+            is_numeric_col = j >= 3  # 3 kolom pertama = No SJ/Sopir/Supplier
+            row[col_labels[j]] = _ocr_cell(gray, y1, y2, x1, x2, numeric=is_numeric_col)
+        # deteksi baris TOTAL/GRAND TOTAL dari teks nama supplier
+        supplier_text = row.get("Nama Supplier", "").upper()
+        row["is_total"] = "YA" if ("TOTAL" in supplier_text) else ""
+        rows.append(row)
+
+    return tanggal, rows, col_labels
 
 
 def build_excel_bytes(rows_df):
@@ -268,8 +353,10 @@ def build_excel_bytes(rows_df):
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    display_cols = [c for c in COLUMNS if c[0] != "is_total"]
-    headers = [label for _, label in display_cols]
+    headers = list(rows_df.columns)
+    if "Baris Total?" in headers:
+        headers.remove("Baris Total?")
+
     ws.append(headers)
     for col_idx in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -280,7 +367,7 @@ def build_excel_bytes(rows_df):
 
     for _, row in rows_df.iterrows():
         is_total = str(row.get("Baris Total?", "")).strip().upper() == "YA"
-        values = [row.get(label, "") for _, label in display_cols]
+        values = [row.get(h, "") for h in headers]
         ws.append(values)
         r = ws.max_row
         for c in range(1, len(values) + 1):
@@ -293,7 +380,8 @@ def build_excel_bytes(rows_df):
 
     for i in range(1, len(headers) + 1):
         ws.column_dimensions[get_column_letter(i)].width = 16
-    ws.column_dimensions["D"].width = 24
+    if "Nama Supplier" in headers:
+        ws.column_dimensions[get_column_letter(headers.index("Nama Supplier") + 1)].width = 24
     ws.freeze_panes = "A2"
 
     output = BytesIO()
@@ -303,30 +391,19 @@ def build_excel_bytes(rows_df):
 
 
 def render_photo_extraction():
-    st.title("📸 Ekstrak Tabel dari Foto (AI)")
-    st.write(
-        "Upload foto tabel *Rekapitulasi Pengeluaran LPG/Bright Gas* — AI akan "
-        "membaca isi tabelnya secara otomatis, hasilnya bisa dikoreksi lalu "
-        "diunduh sebagai Excel."
+    st.title("📸 Ekstrak Tabel dari Foto (OCR Lokal)")
+    st.warning(
+        "Fitur ini berjalan 100% lokal di komputer (OpenCV + Tesseract OCR), "
+        "**tidak memakai API/AI apapun** — tidak butuh API key dan tidak butuh internet. "
+        "Karena tidak pakai AI vision, akurasinya lebih rendah, terutama untuk kolom "
+        "angka dan tabel dengan header bertingkat. **Selalu periksa & koreksi hasil "
+        "sebelum export**, gunakan foto pratinjau di bawah untuk mencocokkan."
     )
 
     if "rows_data" not in st.session_state:
         st.session_state.rows_data = []
-
-    with st.expander("⚙ Pengaturan API Key Anthropic", expanded=not bool(st.session_state.get("api_key"))):
-        st.markdown(
-            "Dapatkan API Key di [console.anthropic.com/settings/keys]"
-            "(https://console.anthropic.com/settings/keys). "
-            "Key hanya dipakai untuk sesi ini dan tidak disimpan permanen di server."
-        )
-        api_key_input = st.text_input(
-            "Anthropic API Key",
-            value=st.session_state.get("api_key", ""),
-            type="password",
-            key="api_key_field"
-        )
-        if api_key_input:
-            st.session_state.api_key = api_key_input.strip()
+    if "columns_order" not in st.session_state:
+        st.session_state.columns_order = None
 
     uploaded_photos = st.file_uploader(
         "Upload Foto Tabel (bisa lebih dari satu)",
@@ -335,9 +412,17 @@ def render_photo_extraction():
         key="photo_uploader"
     )
 
+    if uploaded_photos:
+        with st.expander("🖼 Pratinjau foto (untuk mencocokkan hasil OCR)", expanded=False):
+            preview_cols = st.columns(min(3, len(uploaded_photos)))
+            for i, photo in enumerate(uploaded_photos):
+                photo.seek(0)
+                preview_cols[i % len(preview_cols)].image(photo, caption=photo.name, use_container_width=True)
+                photo.seek(0)
+
     col_a, col_b, col_c = st.columns(3)
     with col_a:
-        process_clicked = st.button("🤖 Proses dengan AI", key="process_btn", use_container_width=True)
+        process_clicked = st.button("🔎 Proses OCR", key="process_btn", use_container_width=True)
     with col_b:
         add_blank_clicked = st.button("➕ Tambah Baris Kosong", key="add_blank_btn", use_container_width=True)
     with col_c:
@@ -345,50 +430,51 @@ def render_photo_extraction():
 
     if clear_clicked:
         st.session_state.rows_data = []
+        st.session_state.columns_order = None
         st.rerun()
 
     if add_blank_clicked:
-        blank = {label: "" for _, label in COLUMNS}
+        labels = st.session_state.columns_order or [l for _, l in COLUMNS]
+        blank = {label: "" for label in labels}
         st.session_state.rows_data.append(blank)
 
     if process_clicked:
-        api_key = st.session_state.get("api_key", "").strip()
-        if not api_key:
-            st.error("Isi API Key Anthropic dulu di bagian pengaturan di atas.")
-        elif not uploaded_photos:
+        if not uploaded_photos:
             st.warning("Upload minimal satu foto dulu.")
         else:
-            progress = st.progress(0, text="Memulai proses...")
+            progress = st.progress(0, text="Memulai proses OCR...")
             total = len(uploaded_photos)
             for idx, photo in enumerate(uploaded_photos, start=1):
                 progress.progress(idx / total, text=f"Memproses foto {idx}/{total}: {photo.name}")
                 try:
-                    ext = os.path.splitext(photo.name)[1].lower()
-                    media_type = {
-                        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                        ".png": "image/png", ".webp": "image/webp",
-                    }.get(ext, "image/jpeg")
-
+                    photo.seek(0)
                     image_bytes = photo.read()
-                    result = call_claude_extract(api_key, image_bytes, media_type)
+                    tanggal, rows, col_labels = extract_table_local(image_bytes)
 
-                    tanggal = result.get("tanggal", "")
-                    for r in result.get("rows", []):
-                        row = {label: r.get(key, "") for key, label in COLUMNS if key not in ("tanggal", "is_total")}
-                        row["Tanggal"] = tanggal
-                        row["Baris Total?"] = "YA" if r.get("is_total") else ""
-                        st.session_state.rows_data.append(row)
+                    full_labels = ["Tanggal"] + col_labels + ["Baris Total?"]
+                    if st.session_state.columns_order is None:
+                        st.session_state.columns_order = full_labels
+
+                    for r in rows:
+                        row_out = {"Tanggal": tanggal}
+                        for label in col_labels:
+                            row_out[label] = r.get(label, "")
+                        row_out["Baris Total?"] = r.get("is_total", "")
+                        st.session_state.rows_data.append(row_out)
 
                 except Exception as e:
                     st.error(f"Gagal memproses {photo.name}: {e}")
 
             progress.progress(1.0, text="Selesai!")
-            st.success(f"Selesai memproses {total} foto. Total baris: {len(st.session_state.rows_data)}")
+            st.success(
+                f"Selesai memproses {total} foto. Total baris: {len(st.session_state.rows_data)}. "
+                "Silakan periksa dan koreksi hasil di tabel bawah."
+            )
 
-    st.subheader("Hasil Ekstraksi (bisa dikoreksi langsung di tabel)")
+    st.subheader("Hasil Ekstraksi (WAJIB diperiksa & dikoreksi langsung di tabel)")
 
     if st.session_state.rows_data:
-        display_labels = [label for _, label in COLUMNS]
+        display_labels = st.session_state.columns_order or [label for _, label in COLUMNS]
         df = pd.DataFrame(st.session_state.rows_data)
         for label in display_labels:
             if label not in df.columns:
@@ -413,7 +499,8 @@ def render_photo_extraction():
             key="download_excel_lpg"
         )
     else:
-        st.info("Belum ada data. Upload foto lalu klik 'Proses dengan AI', atau tambah baris kosong secara manual.")
+        st.info("Belum ada data. Upload foto lalu klik 'Proses OCR', atau tambah baris kosong secara manual.")
+
 
 
 # =====================================================================
@@ -422,7 +509,7 @@ def render_photo_extraction():
 st.sidebar.title("📚 Menu")
 menu = st.sidebar.radio(
     "Pilih fitur:",
-    ["📄 Convert CSV ke XLSX", "📸 Ekstrak Tabel dari Foto (AI)"],
+    ["📄 Convert CSV ke XLSX", "📸 Ekstrak Tabel dari Foto (OCR Lokal)"],
     key="main_menu"
 )
 
