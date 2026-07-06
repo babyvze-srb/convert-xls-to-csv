@@ -29,6 +29,23 @@ def format_tanggal_indonesia(tanggal_str):
     return f"{dt.day} {bulan_id[dt.month]} {dt.year}"
 
 
+def _is_no_column(col_name: str) -> bool:
+    """Deteksi apakah nama kolom merujuk ke kolom 'No' / nomor urut
+    (fleksibel: 'No', 'No.', 'NO', 'No Urut', 'Nomor', dll)."""
+    normalized = re.sub(r"[^a-z0-9]", "", str(col_name).lower())
+    return normalized in ("no", "nourut", "nomor", "nomorurut")
+
+
+def clean_excess_spaces(col: pd.Series) -> pd.Series:
+    """Rapikan spasi berlebihan (mis. 'SJ   0001' -> 'SJ 0001', '  1  ' -> '1')
+    pada kolom object, tanpa mengubah nilai kosong/NaN."""
+    if col.dtype != "object":
+        return col
+    return col.apply(
+        lambda v: re.sub(r"\s+", " ", str(v)).strip() if pd.notna(v) else v
+    )
+
+
 def try_convert_numeric(col: pd.Series) -> pd.Series:
     """
     Kolom bertipe object (string) dicoba dikonversi jadi numerik (kuantitas),
@@ -174,7 +191,12 @@ def render_csv_to_xlsx():
                 lambda col: col.str.strip() if col.dtype == "object" else col
             )
 
-            # 2) Kolom kuantitas/angka dikonversi ke numerik (int/float),
+            # 2) Rapikan spasi berlebihan (spasi ganda, dll) khusus kolom "No"
+            for c in df.columns:
+                if _is_no_column(c):
+                    df[c] = clean_excess_spaces(df[c])
+
+            # 3) Kolom kuantitas/angka dikonversi ke numerik (int/float),
             #    bukan disimpan sebagai string
             df = df.apply(try_convert_numeric)
 
