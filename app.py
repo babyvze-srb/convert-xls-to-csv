@@ -28,6 +28,49 @@ def format_tanggal_indonesia(tanggal_str):
     dt = datetime.strptime(tanggal_str, "%d-%m-%Y")
     return f"{dt.day} {bulan_id[dt.month]} {dt.year}"
 
+
+def try_convert_numeric(col: pd.Series) -> pd.Series:
+    """
+    Kolom bertipe object (string) dicoba dikonversi jadi numerik (kuantitas),
+    supaya di Excel tersimpan sebagai angka (int/float), bukan teks.
+
+    Aturan:
+    - Mendukung format angka Indonesia (mis. "1.234,50" -> 1234.50)
+      maupun format polos (mis. "1234" -> 1234).
+    - Kolom hanya dikonversi jika SELURUH nilai (non-kosong) berhasil
+      diparse sebagai angka. Kalau ada satu saja nilai yang bukan angka
+      (nama, kode berhuruf, alamat, dll), kolom dibiarkan tetap string.
+    - Kalau semua nilai berupa bilangan bulat -> dikonversi ke Int64
+      (integer nullable, tetap aman kalau ada sel kosong/NaN).
+    - Kalau ada nilai desimal -> dikonversi ke float, tetap numerik
+      (bukan string), bukan int.
+    """
+    if col.dtype != "object":
+        return col
+
+    original = col.copy()
+    stripped = col.astype(str).str.strip()
+
+    # Anggap sel kosong sebagai NaN (tidak menggagalkan deteksi numerik)
+    is_blank = stripped.eq("") | stripped.str.lower().eq("nan")
+
+    # Bersihkan format angka Indonesia: "1.234,50" -> "1234.50"
+    cleaned = stripped.str.replace(".", "", regex=False)
+    cleaned = cleaned.str.replace(",", ".", regex=False)
+
+    numeric_col = pd.to_numeric(cleaned, errors="coerce")
+
+    # Jika ada nilai non-blank yang gagal diparse -> bukan kolom numerik,
+    # kembalikan kolom aslinya (string) tanpa perubahan.
+    if numeric_col[~is_blank].isna().any():
+        return original
+
+    # Semua nilai non-blank berhasil jadi angka
+    if (numeric_col.dropna() % 1 == 0).all():
+        return numeric_col.astype("Int64")
+    return numeric_col
+
+
 # =====================================================================
 # MENU 1: CSV -> XLSX CONVERTER
 # =====================================================================
@@ -126,9 +169,14 @@ def render_csv_to_xlsx():
                 engine="python"
             )
 
+            # 1) Trim spasi di semua kolom teks
             df = df.apply(
                 lambda col: col.str.strip() if col.dtype == "object" else col
             )
+
+            # 2) Kolom kuantitas/angka dikonversi ke numerik (int/float),
+            #    bukan disimpan sebagai string
+            df = df.apply(try_convert_numeric)
 
             cols = list(df.columns)
             if len(cols) >= 2:
