@@ -91,23 +91,68 @@ def try_convert_numeric(col: pd.Series) -> pd.Series:
 # =====================================================================
 # MENU 1: CSV -> XLSX CONVERTER
 # =====================================================================
-def render_csv_to_xlsx():
-    st.title("📄 Convert CSV ke XLSX")
-    st.write("Upload file CSV lalu convert ke Excel (.xlsx)")
-
-    uploaded_file = st.file_uploader(
-        "Upload File CSV",
-        type=["csv"],
-        key="csv_uploader"
+def _process_csv_dataframe(uploaded_file):
+    """Baca & bersihkan satu file CSV, kembalikan DataFrame siap diekspor
+    (trim spasi, rapikan kolom No, konversi kolom angka, tukar 2 kolom pertama)."""
+    df = pd.read_csv(
+        uploaded_file,
+        sep=",",
+        quotechar='"',
+        encoding="utf-8",
+        engine="python"
     )
 
+    # 1) Trim spasi di semua kolom teks
+    df = df.apply(
+        lambda col: col.str.strip() if col.dtype == "object" else col
+    )
+
+    # 2) Rapikan spasi berlebihan (spasi ganda, dll) khusus kolom "No"
+    for c in df.columns:
+        if _is_no_column(c):
+            df[c] = clean_excess_spaces(df[c])
+
+    # 3) Kolom kuantitas/angka dikonversi ke numerik (int/float),
+    #    bukan disimpan sebagai string
+    df = df.apply(try_convert_numeric)
+
+    cols = list(df.columns)
+    if len(cols) >= 2:
+        cols[0], cols[1] = cols[1], cols[0]
+        df = df[cols]
+
+    return df
+
+
+def render_csv_to_xlsx():
+    st.title("📄 Convert CSV ke XLSX")
+    st.write(
+        "Upload file CSV untuk SRB dan/atau SGE, lalu convert jadi satu file "
+        "Excel (.xlsx) berisi 2 sheet: **SRB** dan **SGE**."
+    )
+
+    col_up1, col_up2 = st.columns(2)
+    with col_up1:
+        uploaded_srb = st.file_uploader(
+            "Upload File CSV - SRB",
+            type=["csv"],
+            key="csv_uploader_srb"
+        )
+    with col_up2:
+        uploaded_sge = st.file_uploader(
+            "Upload File CSV - SGE",
+            type=["csv"],
+            key="csv_uploader_sge"
+        )
+
+    # File acuan untuk menyusun nama file & tanggal (utamakan SRB, fallback SGE)
+    ref_file = uploaded_srb if uploaded_srb is not None else uploaded_sge
+
     today = datetime.now().strftime("%d-%m-%Y")
-    original_filename = ""
     suggested_name = f"template_{today}"
 
-    if uploaded_file is not None:
-        original_filename = uploaded_file.name
-        suggested_name = os.path.splitext(original_filename)[0]
+    if ref_file is not None:
+        suggested_name = os.path.splitext(ref_file.name)[0]
 
     st.subheader("Pengaturan Nama File")
 
@@ -129,7 +174,7 @@ def render_csv_to_xlsx():
         else:
             file_name = f"{suggested_name}.xlsx"
     else:
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
 
         with col1:
             jenis_dokumen = st.selectbox(
@@ -143,18 +188,12 @@ def render_csv_to_xlsx():
                 ["OLI", "LPG"],
                 key="kategori1_csv"
             )
-        with col3:
-            kategori2 = st.selectbox(
-                "Lokasi",
-                ["SRB", "SGE"],
-                key="kategori2_csv"
-            )
 
         now = datetime.now()
         tanggal_text = f"{now.day} {bulan_id[now.month]} {now.year}"
 
-        if uploaded_file is not None:
-            dates = re.findall(r"\d{2}-\d{2}-\d{4}", uploaded_file.name)
+        if ref_file is not None:
+            dates = re.findall(r"\d{2}-\d{2}-\d{4}", ref_file.name)
 
             if len(dates) >= 2:
                 tgl_awal = format_tanggal_indonesia(dates[0])
@@ -166,51 +205,45 @@ def render_csv_to_xlsx():
             elif len(dates) == 1:
                 tanggal_text = format_tanggal_indonesia(dates[0])
 
-        file_name = f"{jenis_dokumen} {kategori1} {kategori2} {tanggal_text}.xlsx"
+        # Catatan: "Lokasi" tidak lagi jadi bagian nama file karena satu file
+        # xlsx sekarang bisa memuat SRB & SGE sekaligus (dipisah per-sheet).
+        file_name = f"{jenis_dokumen} {kategori1} {tanggal_text}.xlsx"
 
     st.write(f"**Nama file yang akan disimpan:** `{file_name}`")
 
-    if uploaded_file is not None:
+    if uploaded_srb is not None or uploaded_sge is not None:
         st.info(
             'Jika nama mengandung koma seperti:\n'
             '"PT MAJU, JAYA"\n'
             "pastikan di CSV dibungkus tanda kutip."
         )
 
-        try:
-            df = pd.read_csv(
-                uploaded_file,
-                sep=",",
-                quotechar='"',
-                encoding="utf-8",
-                engine="python"
-            )
+        sheets = {}
+        errors = {}
 
-            # 1) Trim spasi di semua kolom teks
-            df = df.apply(
-                lambda col: col.str.strip() if col.dtype == "object" else col
-            )
+        if uploaded_srb is not None:
+            try:
+                sheets["SRB"] = _process_csv_dataframe(uploaded_srb)
+            except Exception as e:
+                errors["SRB"] = str(e)
 
-            # 2) Rapikan spasi berlebihan (spasi ganda, dll) khusus kolom "No"
-            for c in df.columns:
-                if _is_no_column(c):
-                    df[c] = clean_excess_spaces(df[c])
+        if uploaded_sge is not None:
+            try:
+                sheets["SGE"] = _process_csv_dataframe(uploaded_sge)
+            except Exception as e:
+                errors["SGE"] = str(e)
 
-            # 3) Kolom kuantitas/angka dikonversi ke numerik (int/float),
-            #    bukan disimpan sebagai string
-            df = df.apply(try_convert_numeric)
+        for label, msg in errors.items():
+            st.error(f"Gagal membaca file CSV {label}: {msg}")
 
-            cols = list(df.columns)
-            if len(cols) >= 2:
-                cols[0], cols[1] = cols[1], cols[0]
-                df = df[cols]
-
+        if sheets:
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Data")
+                for sheet_name, df in sheets.items():
+                    df.to_excel(writer, index=False, sheet_name=sheet_name)
             output.seek(0)
 
-            st.success("CSV berhasil dibaca")
+            st.success(f"CSV berhasil dibaca: {', '.join(sheets.keys())}")
 
             st.download_button(
                 label="⬇ Download XLSX",
@@ -221,10 +254,12 @@ def render_csv_to_xlsx():
             )
 
             st.subheader("Preview Data")
-            st.dataframe(df, use_container_width=True)
-
-        except Exception as e:
-            st.error(f"Gagal membaca file CSV: {e}")
+            preview_tabs = st.tabs(list(sheets.keys()))
+            for tab, (sheet_name, df) in zip(preview_tabs, sheets.items()):
+                with tab:
+                    st.dataframe(df, use_container_width=True)
+    else:
+        st.info("Upload minimal satu file CSV (SRB dan/atau SGE) untuk mulai.")
 
 
 # =====================================================================
