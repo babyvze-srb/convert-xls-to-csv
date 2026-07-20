@@ -87,15 +87,22 @@ def try_convert_numeric(col: pd.Series) -> pd.Series:
 # =====================================================================
 # MENU 1: CSV -> XLSX CONVERTER
 # =====================================================================
-def _process_csv_dataframe(uploaded_file):
+@st.cache_data(show_spinner=False)
+def _process_csv_dataframe(file_bytes: bytes) -> pd.DataFrame:
     """Baca & bersihkan satu file CSV, kembalikan DataFrame siap diekspor
-    (trim spasi, rapikan kolom No, konversi kolom angka, tukar 2 kolom pertama)."""
+    (trim spasi, rapikan kolom No, konversi kolom angka, tukar 2 kolom pertama).
+
+    Catatan performa:
+    - Pakai engine C bawaan pandas (default), BUKAN engine="python" yang
+      jauh lebih lambat (bisa 10-20x lebih lambat untuk file besar).
+    - Di-cache dengan st.cache_data supaya file yang sama tidak diparse
+      ulang tiap kali ada interaksi lain di halaman (mis. ganti mode nama file).
+    """
     df = pd.read_csv(
-        uploaded_file,
+        BytesIO(file_bytes),
         sep=",",
         quotechar='"',
-        encoding="utf-8",
-        engine="python"
+        encoding="utf-8"
     )
 
     # 1) Trim spasi di semua kolom teks
@@ -219,13 +226,13 @@ def render_csv_to_xlsx():
 
         if uploaded_srb is not None:
             try:
-                sheets["SRB"] = _process_csv_dataframe(uploaded_srb)
+                sheets["SRB"] = _process_csv_dataframe(uploaded_srb.getvalue())
             except Exception as e:
                 errors["SRB"] = str(e)
 
         if uploaded_sge is not None:
             try:
-                sheets["SGE"] = _process_csv_dataframe(uploaded_sge)
+                sheets["SGE"] = _process_csv_dataframe(uploaded_sge.getvalue())
             except Exception as e:
                 errors["SGE"] = str(e)
 
